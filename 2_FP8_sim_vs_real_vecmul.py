@@ -141,10 +141,10 @@ import sys
         x_vals=[2**i for i in range(12, 30, 1)],  # Different possible values for `x_name`.
         x_log=True,  # x axis is logarithmic.
         line_arg='provider',  # Argument name whose value corresponds to a different line in the plot.
-        line_vals=['sim', 'real'],  # Possible values for `line_arg`.
-        line_names=['sim', 'real'],  # Label name for the lines.
-        styles=[('blue', '-'), ('green', '-')],  # Line styles.
-        ylabel='GB/s',  # Label name for the y-axis.
+        line_vals=['sim', 'real', 'fp16'],  # Possible values for `line_arg`.
+        line_names=['sim', 'real', 'fp16'],  # Label name for the lines.
+        styles=[('blue', '-'), ('green', '-'), ('red', '-')],  # Line styles.
+        ylabel='G-Elements/s',  # Label name for the y-axis.
         plot_name='vector-mul-performance',  # Name for the plot. Used also as a file name for saving the plot.
         args={},  # Values for function arguments not in `x_names` and `y_name`.
     ))
@@ -159,7 +159,12 @@ def benchmark(size, provider):
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: vecmul_sim(a, b), warmup=10, rep=100, quantiles=quantiles)
     if provider == 'real':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: vecmul_real(a, b), warmup=10, rep=100, quantiles=quantiles)
-    gbps = lambda ms: 1 * a.numel() * a.element_size() * 1e-9 / (ms * 1e-3)
+    if provider == 'fp16':
+        a = a.to(torch.float16)
+        b = b.to(torch.float16)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.mul(a, b), warmup=10, rep=100, quantiles=quantiles)
+
+    gbps = lambda ms: 1 * a.numel() * 1 * 1e-9 / (ms * 1e-3)
     return gbps(ms), gbps(max_ms), gbps(min_ms)
 
 benchmark.run(print_data=True, show_plots=True)

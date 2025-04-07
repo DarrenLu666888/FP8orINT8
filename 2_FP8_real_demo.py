@@ -57,17 +57,17 @@ if TORCH_HAS_FP8 and is_cuda():
     b = b.to(torch.float8_e4m3fn)
     # print(f"a={a}")
     # print(f"b={b}")
-    print(triton.testing.do_bench(lambda: vecmul(a, b), warmup=10, rep=100))
-    # triton_output = vecmul(a, b)
-    # triton_output = triton_output.to(torch.float16)
-    # assert a.dtype == torch.float8_e4m3fn
-    # assert b.dtype == torch.float8_e4m3fn
-    # torch_output = torch.mul(a.to(torch.float16), b.to(torch.float16))
-    # print(f"triton_output_with_fp8_inputs={triton_output}")
-    # print(f"torch_output={torch_output}")
-    # if torch.allclose(triton_output, torch_output, atol=0.125, rtol=0):
-    #     print("✅ Triton and Torch match")
-    # else:
-    #     print("❌ Triton and Torch differ")
+    # print(triton.testing.do_bench(lambda: vecmul(a, b), warmup=10, rep=100))
+    triton_output = vecmul(a, b)
+    triton_output = triton_output.to(torch.float16)
+    assert a.dtype == torch.float8_e4m3fn
+    assert b.dtype == torch.float8_e4m3fn
+    torch_output = torch.mul(a.to(torch.float16), b.to(torch.float16))
+    print(f"triton_output_with_fp8_inputs={triton_output}")
+    print(f"torch_output={torch_output}")
+    if torch.allclose(triton_output, torch_output, atol=0.125, rtol=0):
+        print("✅ Triton and Torch match")
+    else:
+        print("❌ Triton and Torch differ")
 else:
     print("Skipping the test since torch.float8_e4m3fn is not available.")

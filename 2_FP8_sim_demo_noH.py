@@ -1,7 +1,7 @@
+import torch
+
 import triton
 import triton.language as tl
-import torch
-import pdb
 
 def is_cuda():
     return triton.runtime.driver.active.get_current_target().backend == "cuda"
@@ -72,27 +72,43 @@ def vecmul(a, b):
 # test fp8_mul_sim_kernel accuracy
 
 import sys
-N = int(sys.argv[1])
+# N = int(sys.argv[1])
 TORCH_HAS_FP8 = hasattr(torch, "float8_e4m3fn")
-if TORCH_HAS_FP8 and is_cuda():
-    torch.manual_seed(0)
-    a = torch.randn((N), device='cuda', dtype=torch.float16)
-    b = torch.randn((N), device='cuda', dtype=torch.float16)
-    a = a.to(torch.float8_e4m3fn)
-    b = b.to(torch.float8_e4m3fn)
-    # print(f"a={a}")
-    # print(f"b={b}")
-    # print(triton.testing.do_bench(lambda: vecmul(a, b), warmup=10, rep=100))
+if 1:
+    # torch.manual_seed(0)
+    # a = torch.randn((N), device='cuda', dtype=torch.float16)
+    # b = torch.randn((N), device='cuda', dtype=torch.float16)
+    # a = a.to(torch.float8_e4m3fn)
+    # b = b.to(torch.float8_e4m3fn)
+    # # dump a and b view as int8, save to npy file
+    # a_view_int8 = a.view(torch.uint8)
+    # b_view_int8 = b.view(torch.uint8)
+    # a_view_int8 = a_view_int8.cpu().numpy()
+    # b_view_int8 = b_view_int8.cpu().numpy()
+    # import numpy as np
+    # np.save("a.npy", a_view_int8)
+    # np.save("b.npy", b_view_int8)
+    
+    # load a and b from npy file
+    import numpy as np
+    a = np.load("a.npy")
+    b = np.load("b.npy")
+    a = torch.from_numpy(a).cuda()
+    b = torch.from_numpy(b).cuda()
     triton_output = vecmul(a, b)
     triton_output = triton_output.to(torch.float16)
-    assert a.dtype == torch.float8_e4m3fn
-    assert b.dtype == torch.float8_e4m3fn
-    torch_output = torch.mul(a.to(torch.float16), b.to(torch.float16))
+
+    ref_triton_output = np.load("triton_output.npy")
+    ref_triton_output = torch.from_numpy(ref_triton_output)
+    ref_triton_output = ref_triton_output.view(torch.float16)
+    # compare triton_output and ref_triton_output
     print(f"triton_output_with_fp8_inputs={triton_output}")
-    print(f"torch_output={torch_output}")
-    if torch.allclose(triton_output, torch_output, atol=0.125, rtol=0):
-        print("✅ Triton and Torch match")
+    print(f"ref_triton_output={ref_triton_output}")
+    if torch.allclose(triton_output.cpu(), ref_triton_output, atol=0.125, rtol=0):
+        print("✅ Triton and ref_Triton match")
     else:
-        print("❌ Triton and Torch differ")
+        print("❌ Triton and ref_Triton differ")
+
+
 else:
     print("Skipping the test since torch.float8_e4m3fn is not available.")
