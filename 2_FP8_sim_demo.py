@@ -71,11 +71,13 @@ def vecmul(a, b):
 
 # test fp8_mul_sim_kernel accuracy
 
+import sys
+N = int(sys.argv[1])
 TORCH_HAS_FP8 = hasattr(torch, "float8_e4m3fn")
 if TORCH_HAS_FP8 and is_cuda():
     torch.manual_seed(0)
-    a = torch.randn((256*4), device='cuda', dtype=torch.float16)
-    b = torch.randn((256*4), device='cuda', dtype=torch.float16)
+    a = torch.randn((N), device='cuda', dtype=torch.float16)
+    b = torch.randn((N), device='cuda', dtype=torch.float16)
     a = a.to(torch.float8_e4m3fn)
     b = b.to(torch.float8_e4m3fn)
     # print(f"a={a}")

@@ -7,7 +7,7 @@ def is_cuda():
     return triton.runtime.driver.active.get_current_target().backend == "cuda"
 
 @triton.jit
-def fp8_mul_real_kernel(x_ptr,  # *Pointer* to first input vector.
+def int8_mul_real_kernel(x_ptr,  # *Pointer* to first input vector.
                y_ptr,  # *Pointer* to second input vector.
                output_ptr,  # *Pointer* to output vector.
                n_elements,  # Size of the vector.
@@ -29,7 +29,9 @@ def fp8_mul_real_kernel(x_ptr,  # *Pointer* to first input vector.
     # multiple of the block size.
     x = tl.load(x_ptr + offsets, mask=mask)
     y = tl.load(y_ptr + offsets, mask=mask)
-    output = tl.fma(x, y, 0.0)
+    # x.to(torch.int16)
+    # y.to(torch.int16)
+    output = x * y
     # Write x + y back to DRAM.
     tl.store(output_ptr + offsets, output, mask=mask)
 
@@ -38,31 +40,29 @@ def vecmul(a, b):
     # Check constraints.
     assert a.shape == b.shape, "Incompatible dimensions"
     assert a.is_contiguous(), "Matrix A must be contiguous"
-    c = torch.empty(a.shape, device=a.device, dtype=torch.float16)
+    c = torch.empty(a.shape, device=a.device, dtype=torch.int16)
     n_elements = a.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
-    fp8_mul_real_kernel[grid](a, b, c, n_elements, 256)
+    int8_mul_real_kernel[grid](a, b, c, n_elements, 256)
     return c
 
 # test fp8_mul_sim_kernel accuracy
-
 import sys
 N = int(sys.argv[1])
-TORCH_HAS_FP8 = hasattr(torch, "float8_e4m3fn")
-if TORCH_HAS_FP8 and is_cuda():
+if is_cuda():
     torch.manual_seed(0)
-    a = torch.randn((N), device='cuda', dtype=torch.float16)
-    b = torch.randn((N), device='cuda', dtype=torch.float16)
-    a = a.to(torch.float8_e4m3fn)
-    b = b.to(torch.float8_e4m3fn)
+    a = torch.randint(127,(N,), device='cuda')
+    b = torch.randint(127,(N,), device='cuda')
+    a = a.to(torch.int8)
+    b = b.to(torch.int8)
     # print(f"a={a}")
     # print(f"b={b}")
     print(triton.testing.do_bench(lambda: vecmul(a, b), warmup=10, rep=100))
     # triton_output = vecmul(a, b)
-    # triton_output = triton_output.to(torch.float16)
-    # assert a.dtype == torch.float8_e4m3fn
-    # assert b.dtype == torch.float8_e4m3fn
-    # torch_output = torch.mul(a.to(torch.float16), b.to(torch.float16))
+    # triton_output = triton_output.to(torch.int16)
+    # torch_output = torch.mul(a, b)
+    # torch_output = torch_output.to(torch.int16)
+    # # torch_output = torch.mul(a.to(torch.int16), b.to(torch.int16))
     # print(f"triton_output_with_fp8_inputs={triton_output}")
     # print(f"torch_output={torch_output}")
     # if torch.allclose(triton_output, torch_output, atol=0.125, rtol=0):
