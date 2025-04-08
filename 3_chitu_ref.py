@@ -4,8 +4,6 @@ import triton
 import triton.language as tl
 from triton import Config
 
-
-
 fp8_gemm_deepseek_v3_configs = [
     Config(
         {"BLOCK_SIZE_M": block_m, "BLOCK_SIZE_N": block_n, "BLOCK_SIZE_K": 128},
@@ -18,22 +16,18 @@ fp8_gemm_deepseek_v3_configs = [
 ]
 
 
-@triton.autotune(configs=fp8_gemm_deepseek_v3_configs, key=["N", "K"])
+# @triton.autotune(configs=fp8_gemm_deepseek_v3_configs, key=["N", "K"])
 @triton.jit
 def fp8_gemm_deepseek_v3_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
-    a_s_ptr,
-    b_s_ptr,
     M,
     N: tl.constexpr,
     K: tl.constexpr,
-    group_n: tl.constexpr,
-    group_k: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr
 ):
     """
     Performs a matrix multiplication operation on FP8 matrices with scaling factors.
@@ -42,13 +36,9 @@ def fp8_gemm_deepseek_v3_kernel(
         a_ptr (tl.tensor): Pointer to the first input matrix A.
         b_ptr (tl.tensor): Pointer to the second input matrix B.
         c_ptr (tl.tensor): Pointer to the output matrix C.
-        a_s_ptr (tl.tensor): Pointer to the scaling factors for matrix A.
-        b_s_ptr (tl.tensor): Pointer to the scaling factors for matrix B.
         M (int): Number of rows in matrix A and C.
         N (tl.constexpr): Number of columns in matrix B and C.
         K (tl.constexpr): Number of columns in matrix A and rows in matrix B.
-        group_n (tl.constexpr): Quantization group size for the N dimension.
-        group_k (tl.constexpr): Quantization group size for the K dimension.
         BLOCK_SIZE_M (tl.constexpr): Block size for the M dimension.
         BLOCK_SIZE_N (tl.constexpr): Block size for the N dimension.
         BLOCK_SIZE_K (tl.constexpr): Block size for the K dimension.
@@ -64,16 +54,12 @@ def fp8_gemm_deepseek_v3_kernel(
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     a_ptrs = a_ptr + offs_m[:, None] * K + offs_k[None, :]
     b_ptrs = b_ptr + offs_n[None, :] * K + offs_k[:, None]
-    a_s_ptrs = a_s_ptr + offs_m * k
-    b_s_ptrs = b_s_ptr + (offs_n // group_n) * k
 
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for i in range(k):
         a = tl.load(a_ptrs, mask=offs_k[None, :] < K - i * BLOCK_SIZE_K, other=0.0)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - i * BLOCK_SIZE_K, other=0.0)
-        a_s = tl.load(a_s_ptrs + i * BLOCK_SIZE_K // group_k)
-        b_s = tl.load(b_s_ptrs + i * BLOCK_SIZE_K // group_k)
-        accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]
+        accumulator += tl.dot(a, b)
         a_ptrs += BLOCK_SIZE_K
         b_ptrs += BLOCK_SIZE_K
     c = accumulator.to(c_ptr.dtype.element_ty)
@@ -104,22 +90,20 @@ soft_fp8_gemm_deepseek_v3_configs = [
 ]
 
 
-@triton.autotune(configs=soft_fp8_gemm_deepseek_v3_configs, key=["N", "K"])
+# @triton.autotune(configs=soft_fp8_gemm_deepseek_v3_configs, key=["N", "K"])
 @triton.jit
 def soft_fp8_gemm_deepseek_v3_kernel(
     A,
     B,
     C,
-    Bs,
     M,
     N: tl.constexpr,
     K: tl.constexpr,
-    group_n: tl.constexpr,
-    group_k: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
+    fp8_to_fp32_scale: tl.constexpr,
 ):
     """
     Perform a matrix multiplication with FP8 dynamically casted to BF16.
@@ -128,7 +112,6 @@ def soft_fp8_gemm_deepseek_v3_kernel(
         A (tl.tensor): Pointer to the first input matrix A.
         B (tl.tensor): Pointer to the second input matrix B.
         C (tl.tensor): Pointer to the output matrix C.
-        Bs (tl.tensor): Pointer to the scaling factors for matrix B.
         M (int): Number of rows in matrix A and C.
         N (tl.constexpr): Number of columns in matrix B and C.
         K (tl.constexpr): Number of columns in matrix A and rows in matrix B.
@@ -157,71 +140,90 @@ def soft_fp8_gemm_deepseek_v3_kernel(
     a_ptrs = A + (offs_am[:, None] * K + offs_k[None, :])
     b_ptrs = B + (offs_k[:, None] + offs_bn[None, :] * K)
 
-    offs_bsn = offs_bn // group_n
-    Bs_ptrs = Bs + offs_bsn * tl.cdiv(K, BLOCK_SIZE_K)
 
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
 
-        k_start = k * BLOCK_SIZE_K
-        offs_ks = k_start // group_k
-        b_s = tl.load(Bs_ptrs + offs_ks)
-
-        b_unpacked_int32 = tl.inline_asm_elementwise(
-            asm="""
-                    {
-                        .reg .b8 tmp<4>;
-                        mov.b32 {tmp0, tmp1, tmp2, tmp3}, $4;
-                        cvt.u32.u8 $0, tmp0;
-                        cvt.u32.u8 $1, tmp1;
-                        cvt.u32.u8 $2, tmp2;
-                        cvt.u32.u8 $3, tmp3;
-                    }
-                    """,
-            constraints=(
-                "=r,=r,=r,=r,"  # Ouputs: $0, $1, $2, $3
-                "r"  # Input: $5
-            ),
-            args=[b],
-            dtype=(tl.int32),
-            is_pure=True,
-            pack=4,
+        a_uint32 = a.to(tl.uint8, bitcast=True).to(tl.uint32)
+        a_fp32 = (((a_uint32 & 0x80) << 24) | ((a_uint32 & 0x7F) << 20)).to(
+            tl.float32, bitcast=True
         )
-
-        b_unpacked_bits_fp32 = ((b_unpacked_int32 & 0x80) << 24) | (
-            (b_unpacked_int32 & 0x7F) << 20
+        b_uint32 = b.to(tl.uint8, bitcast=True).to(tl.uint32)
+        b_fp32 = (((b_uint32 & 0x80) << 24) | ((b_uint32 & 0x7F) << 20)).to(
+            tl.float32, bitcast=True
         )
-        b_new_scale = tl.inline_asm_elementwise(
-            asm="""
-                    {
-                        mul.f32 $0, $1, 0f7B800000;
-                    }
-                    """,
-            constraints=("=f," "f"),
-            args=[b_s],
-            dtype=(tl.float32),
-            is_pure=True,
-            pack=1,
-        )
-        unpacked_f32 = b_unpacked_bits_fp32.to(dtype=tl.float32, bitcast=True)
-        b_new_value = unpacked_f32 * b_new_scale
-        b_new_value = b_new_value.to(dtype=tl.bfloat16)
-        accumulator += tl.dot(a, b_new_value)
+        a_fp32 = a_fp32 * fp8_to_fp32_scale
+        b_fp32 = b_fp32 * fp8_to_fp32_scale
+        a_compute = a_fp32.to(tl.float16)
+        b_compute = b_fp32.to(tl.float16)
+        accumulator += tl.dot(a_compute, b_compute)
 
         a_ptrs += BLOCK_SIZE_K
         b_ptrs += BLOCK_SIZE_K
 
-    if C.dtype.element_ty == tl.bfloat16:
-        c = accumulator.to(tl.bfloat16)
-    elif C.dtype.element_ty == tl.float16:
-        c = accumulator.to(tl.float16)
-    else:
-        c = accumulator.to(tl.float32)
+    c = accumulator.to(C.dtype.element_ty)
 
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = C + N * offs_cm[:, None] + offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, c, mask=c_mask)
+
+# test fp8_gemm_deepseek_v3_kernel
+if __name__ == "__main__":
+    import torch
+
+    M, N, K = 128, 128, 256
+    a = torch.randn(M, K).cuda().to(torch.float8_e4m3fn)
+    b = torch.randn(N, K).cuda().to(torch.float8_e4m3fn)
+    c = torch.zeros(M, N).cuda().half()
+    c_soft = torch.zeros(M, N).cuda().half()
+    
+    grid = lambda META: (
+        triton.cdiv(M, META["BLOCK_SIZE_M"]),
+        triton.cdiv(N, META["BLOCK_SIZE_N"]),
+    )
+    fp8_gemm_deepseek_v3_kernel[grid](
+        a,
+        b,
+        c,
+        M,
+        N,
+        K,
+        BLOCK_SIZE_M=32,
+        BLOCK_SIZE_N=32,
+        BLOCK_SIZE_K=128,
+    )
+    torch.cuda.synchronize()
+    print(c)
+
+    grid_soft = lambda META: (
+        triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
+    )
+    import struct
+    # 0x7b800000 = 2^127
+    fp8_to_fp32_scale = struct.unpack(">f", bytes.fromhex("7b800000"))[0]
+    soft_fp8_gemm_deepseek_v3_kernel[grid_soft](
+        a.view(torch.uint8),
+        b.view(torch.uint8),
+        c_soft,
+        M,
+        N,
+        K,
+        BLOCK_SIZE_M=32,
+        BLOCK_SIZE_N=32,
+        BLOCK_SIZE_K=128,
+        GROUP_SIZE_M=32,
+        fp8_to_fp32_scale=fp8_to_fp32_scale,
+    )
+    torch.cuda.synchronize()
+    print(c_soft)
+    # Check the result
+    expected_result = torch.matmul(a.to(torch.float16), b.transpose(0, 1).to(torch.float16))
+    # expected_result = expected_result.to(torch.float16)
+    print("Expected result:", expected_result)
+    assert torch.allclose(c, expected_result, rtol=1e-2), "Output mismatch!"
+    assert torch.allclose(c_soft, expected_result, rtol=1e-2), "Output mismatch!"
+    print("Output is correct!")
